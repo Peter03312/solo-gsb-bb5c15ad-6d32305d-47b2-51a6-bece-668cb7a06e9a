@@ -47,6 +47,13 @@
     { "id": "dep-z2-l4", "predecessorId": "cue-z2", "successorId": "cue-l4", "waitSeconds": 5, "note": "张三上台亮相后至少 5 秒李四才能上二层平台（跨演员满足演示）" },
     { "id": "dep-l2-w2", "predecessorId": "cue-l2", "successorId": "cue-w2", "waitSeconds": 0, "note": "李四独唱后王五方可前往天台（后置口令不可达 → 无法判定演示）" }
   ],
+  "costumeChanges": [
+    { "id": "cc-z1-z2", "fromCueId": "cue-z1", "toCueId": "cue-z2", "areaId": "area-wing-r", "seconds": 2 },
+    { "id": "cc-l2-l3", "fromCueId": "cue-l2", "toCueId": "cue-l3", "areaId": "area-upstage", "seconds": 12 },
+    { "id": "cc-l4-l5", "fromCueId": "cue-l4", "toCueId": "cue-l5", "areaId": "area-upstage", "seconds": 10 },
+    { "id": "cc-z3-z4", "fromCueId": "cue-z3", "toCueId": "cue-z4", "areaId": "area-center", "seconds": 3 },
+    { "id": "cc-w1-w2", "fromCueId": "cue-w1", "toCueId": "cue-w2", "areaId": "area-roof", "seconds": 10 }
+  ],
   "audiencePoints": [
     { "id": "aud-a1", "name": "A 区 1 排 1 座", "x": 500, "y": -800, "eyeHeight": 120 },
     { "id": "aud-a2", "name": "A 区 5 排 6 座", "x": 1500, "y": -2000, "eyeHeight": 115 },

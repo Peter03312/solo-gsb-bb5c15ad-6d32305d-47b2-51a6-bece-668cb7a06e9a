@@ -15,6 +15,7 @@ const {
 const { buildReplay, ImportFileError: ReplayFileError } = require('./replay');
 const { analyzeSightlines } = require('./sightline');
 const { analyzeRigging } = require('./rigging');
+const { evaluateCostumeChanges, MAX_CHANGE_SECONDS } = require('./costume');
 
 const router = express.Router();
 
@@ -399,6 +400,74 @@ router.delete('/dependencies/:id', (req, res) => {
   res.status(204).end();
 });
 
+/* ---------- 演员换装核查 ---------- */
+
+/** 过滤掉关联口令或换装区域已不存在的换装任务（删除口令 / 演员 / 区域后保持引用一致） */
+function pruneCostumeChanges(data) {
+  const cueIds = new Set(data.cues.map((c) => c.id));
+  const areaIds = new Set(data.areas.map((a) => a.id));
+  data.costumeChanges = (data.costumeChanges || []).filter(
+    (t) => cueIds.has(t.fromCueId) && cueIds.has(t.toCueId) && areaIds.has(t.areaId)
+  );
+}
+
+/** 全量换装核查评估：按当前模式取各区段实际出发时刻，两段分别计最早路线（含封闭等待 / 绕行） */
+router.get('/costume-changes/evaluate', (req, res) => {
+  const mode = parseMode(req.query);
+  if (!mode) return res.status(400).json({ error: 'mode 必须是 classic 或 propagate' });
+  res.json(evaluateCostumeChanges(store.load(), mode));
+});
+
+/** 登记换装任务：同一演员相邻两条口令 + 换装区域 + 所需整数秒数；每个区段最多一项 */
+router.post('/costume-changes', (req, res) => {
+  const data = store.load();
+  const body = req.body || {};
+  const fromCue = data.cues.find((c) => c.id === body.fromCueId);
+  const toCue = data.cues.find((c) => c.id === body.toCueId);
+  if (!fromCue || !toCue) return res.status(400).json({ error: '起点 / 终点口令必须是已存在的口令' });
+  if (fromCue.id === toCue.id) return res.status(400).json({ error: '起点与终点不能是同一条口令' });
+  if (fromCue.actorId !== toCue.actorId) return res.status(400).json({ error: '两条口令必须属于同一位演员' });
+  if (!data.areas.some((a) => a.id === body.areaId)) {
+    return res.status(400).json({ error: '必须选择已存在的换装区域' });
+  }
+  if (!isNonNegativeInt(body.seconds) || body.seconds > MAX_CHANGE_SECONDS) {
+    return res.status(400).json({ error: `换装所需秒数必须是 0～${MAX_CHANGE_SECONDS} 的整数` });
+  }
+  // 相邻判定与 simulateActor 同一口径：过滤失效区域后按时间升序，两条口令必须前后相邻
+  const areaIds = new Set(data.areas.map((a) => a.id));
+  const list = data.cues
+    .filter((c) => c.actorId === fromCue.actorId && areaIds.has(c.areaId))
+    .slice()
+    .sort((x, y) => x.time - y.time);
+  const idx = list.findIndex((c) => c.id === fromCue.id);
+  if (idx === -1 || idx + 1 >= list.length || list[idx + 1].id !== toCue.id) {
+    return res.status(400).json({ error: '两条口令不是该演员按时间排序的相邻口令，无法登记换装任务' });
+  }
+  const dup = data.costumeChanges.some((t) => t.fromCueId === fromCue.id && t.toCueId === toCue.id);
+  if (dup) return res.status(409).json({ error: '该区段已登记换装任务（每个区段最多一项），可先删除原任务' });
+
+  const task = {
+    id: crypto.randomUUID(),
+    fromCueId: fromCue.id,
+    toCueId: toCue.id,
+    areaId: body.areaId,
+    seconds: body.seconds,
+  };
+  data.costumeChanges.push(task);
+  store.save();
+  res.status(201).json(task);
+});
+
+/** 删除换装任务 */
+router.delete('/costume-changes/:id', (req, res) => {
+  const data = store.load();
+  const idx = data.costumeChanges.findIndex((t) => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: '换装任务不存在' });
+  data.costumeChanges.splice(idx, 1);
+  store.save();
+  res.status(204).end();
+});
+
 /* ---------- 排练数据 CSV 导入 ---------- */
 
 /** CSV 模板下载（带 UTF-8 BOM，Excel 直接打开中文不乱码） */
@@ -600,6 +669,8 @@ router.delete('/:collection/:id', (req, res) => {
 
   // 删除口令（或因删除区域 / 演员连带删除口令）后，级联清理相关口令依赖
   pruneDependencies(data);
+  // 删除口令 / 区域（含连带删除口令）后，级联清理相关换装任务
+  pruneCostumeChanges(data);
 
   store.save();
   res.status(204).end();

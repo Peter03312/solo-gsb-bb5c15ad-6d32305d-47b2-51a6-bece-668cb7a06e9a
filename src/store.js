@@ -19,13 +19,18 @@ function ensureDataFile() {
 
 /** 规整数据结构：补齐缺失的集合与基线存储（兼容旧版数据文件） */
 function normalize(data) {
-  for (const key of ['areas', 'edges', 'actors', 'cues', 'dependencies', 'audiencePoints', 'targets', 'obstacles', 'rigPoints', 'rigItems']) {
+  for (const key of ['areas', 'edges', 'actors', 'cues', 'dependencies', 'costumeChanges', 'audiencePoints', 'targets', 'obstacles', 'rigPoints', 'rigItems']) {
     if (!Array.isArray(data[key])) data[key] = [];
   }
   // 清理历史残留：依赖任一端口令不存在（如手工编辑过数据文件）时直接丢弃
   const cueIds = new Set(data.cues.map((c) => c.id));
   data.dependencies = data.dependencies.filter(
     (d) => d && cueIds.has(d.predecessorId) && cueIds.has(d.successorId)
+  );
+  // 清理历史残留：换装任务关联的口令或换装区域不存在时直接丢弃
+  const areaIds = new Set(data.areas.map((a) => a.id));
+  data.costumeChanges = data.costumeChanges.filter(
+    (t) => t && cueIds.has(t.fromCueId) && cueIds.has(t.toCueId) && areaIds.has(t.areaId)
   );
   // 清理历史残留：吊挂件任一吊点不存在时直接丢弃
   const rigPointIds = new Set(data.rigPoints.map((p) => p.id));

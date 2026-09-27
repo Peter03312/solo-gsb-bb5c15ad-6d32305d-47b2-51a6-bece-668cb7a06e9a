@@ -8,7 +8,7 @@ const MODE_LABEL = {
 const MODE_NAME = { propagate: '连续口令延误传导', classic: '区段独立校验' };
 
 const state = {
-  data: { areas: [], edges: [], actors: [], cues: [], dependencies: [], audiencePoints: [], targets: [], obstacles: [], rigPoints: [], rigItems: [] },
+  data: { areas: [], edges: [], actors: [], cues: [], dependencies: [], costumeChanges: [], audiencePoints: [], targets: [], obstacles: [], rigPoints: [], rigItems: [] },
   validation: null,
   mode: localStorage.getItem('validate-mode') === 'classic' ? 'classic' : 'propagate',
   evacuation: null, // 已生成快照的参数 { time, exits: [areaId] }；null 表示未启用
@@ -22,6 +22,7 @@ const state = {
   sightlines: null, // 观众视线遮挡检查结果（pairs / summary）
   sightFocus: null, // 当前高亮的视线对键 `${audienceId}|${targetId}`
   rigging: null, // 吊挂布景载荷核算结果（points / items / summary）
+  costumeEval: null, // 演员换装核查评估结果（items / summary，按当前模式）
 };
 
 /* ---------- 工具 ---------- */
@@ -95,16 +96,18 @@ function actorName(id) {
 /* ---------- 数据加载与渲染 ---------- */
 
 async function refresh() {
-  const [data, validation, sightlines, rigging] = await Promise.all([
+  const [data, validation, sightlines, rigging, costumeEval] = await Promise.all([
     api('/api/data'),
     api(`/api/validate?mode=${state.mode}`),
     api('/api/sightlines'),
     api('/api/rigging'),
+    api(`/api/costume-changes/evaluate?mode=${state.mode}`),
   ]);
   state.data = data;
   state.validation = validation;
   state.sightlines = sightlines;
   state.rigging = rigging;
+  state.costumeEval = costumeEval;
   renderAreas();
   renderEdges();
   renderActors();
@@ -112,6 +115,7 @@ async function refresh() {
   renderDependencies();
   renderValidation();
   renderEvacExitOptions();
+  renderCostumeChanges();
   renderAudiencePoints();
   renderTargets();
   renderObstacles();
@@ -124,9 +128,15 @@ async function refresh() {
 
 /** 仅重新校验并刷新结果区（模式切换时使用） */
 async function refreshValidation() {
-  state.validation = await api(`/api/validate?mode=${state.mode}`);
+  const [validation, costumeEval] = await Promise.all([
+    api(`/api/validate?mode=${state.mode}`),
+    api(`/api/costume-changes/evaluate?mode=${state.mode}`),
+  ]);
+  state.validation = validation;
+  state.costumeEval = costumeEval;
   renderValidation();
   renderDependencies();
+  renderCostumeChanges();
 }
 
 /** 更新「导出校验报告」链接：已生成疏散快照时携带同一快照参数，报告将追加同一快照 */
@@ -929,6 +939,218 @@ function bindDependencies() {
   });
 }
 
+/* ---------- 演员换装核查 ---------- */
+
+const COSTUME_STATUS_LABEL = {
+  ok: '✅ 准时',
+  fail: '❌ 迟到',
+  unreachable: '⛔ 不可达',
+  unknown: '❓ 无法评估',
+};
+
+/** 填充换装表单：相邻口令区段下拉（按演员分组，已登记的区段不再出现）与换装区域下拉 */
+function fillCostumeSelects() {
+  const registered = new Set((state.data.costumeChanges || []).map((t) => `${t.fromCueId}|${t.toCueId}`));
+  const areaIds = new Set(state.data.areas.map((a) => a.id));
+  const groups = [];
+  for (const actor of state.data.actors) {
+    // 与服务端相邻判定同一口径：过滤失效区域后按时间升序
+    const cues = state.data.cues
+      .filter((c) => c.actorId === actor.id && areaIds.has(c.areaId))
+      .slice()
+      .sort((x, y) => x.time - y.time);
+    const options = [];
+    for (let i = 0; i + 1 < cues.length; i++) {
+      const key = `${cues[i].id}|${cues[i + 1].id}`;
+      if (registered.has(key)) continue; // 每个区段最多一项
+      options.push(
+        `<option value="${key}">${fmtTime(cues[i].time)} ${escapeHtml(areaName(cues[i].areaId))} → ` +
+          `${fmtTime(cues[i + 1].time)} ${escapeHtml(areaName(cues[i + 1].areaId))}</option>`
+      );
+    }
+    if (options.length > 0) {
+      groups.push(`<optgroup label="${escapeHtml(actor.name)}">${options.join('')}</optgroup>`);
+    }
+  }
+  $('cc-segment').innerHTML = groups.join('') || '<option value="">暂无可登记的相邻口令区段</option>';
+  fillSelect($('cc-area'), state.data.areas, '选择换装区域');
+}
+
+/** 单段路线展示：路径链 + 逐边时刻与等待标注（与校验结果路线单元格同口径） */
+function costumeLegHtml(leg, label) {
+  if (!leg) return '';
+  const path = leg.path.length > 0 ? escapeHtml(leg.path.join(' → ')) : '—';
+  let detail;
+  if (leg.legs.length > 0) {
+    detail = leg.legs
+      .map((l) => {
+        let s = `${fmtTime(l.departTime)} ${escapeHtml(l.fromName)} → ${fmtTime(l.arriveTime)} ${escapeHtml(l.toName)}`;
+        if (l.waitSeconds > 0) s += ` <span class="wait-tag">⏱ 在 ${escapeHtml(l.fromName)} 等待 ${l.waitSeconds} 秒</span>`;
+        return s;
+      })
+      .join('<br>');
+  } else {
+    detail = '<span class="empty-hint">无需移动</span>';
+  }
+  return `<div class="cc-leg"><span class="cc-leg-label">${label}</span> ${path}<span class="leg-detail">${detail}</span></div>`;
+}
+
+/** 渲染换装核查结果（随校验结果与当前模式即时重算） */
+function renderCostumeChanges() {
+  const el = $('costume-results');
+  const tasks = state.data.costumeChanges || [];
+  if (tasks.length === 0) {
+    el.innerHTML = '<p class="empty-hint">暂无换装任务。选择相邻口令区段、换装区域并填写所需秒数后点击「登记换装任务」。</p>';
+    fillCostumeSelects();
+    return;
+  }
+
+  const evalRes = state.costumeEval;
+  const byId = new Map((evalRes ? evalRes.items : []).map((it) => [it.id, it]));
+  const s = evalRes
+    ? evalRes.summary
+    : { total: tasks.length, ok: 0, fail: 0, unreachable: 0, unknown: tasks.length };
+  const chips = [
+    `<span class="cc-chip">换装任务 <strong>${s.total}</strong></span>`,
+    `<span class="cc-chip ${s.ok ? 'good' : ''}">准时 <strong>${s.ok}</strong></span>`,
+    `<span class="cc-chip ${s.fail ? 'bad' : ''}">迟到 <strong>${s.fail}</strong></span>`,
+    `<span class="cc-chip ${s.unreachable ? 'warn' : ''}">不可达 <strong>${s.unreachable}</strong></span>`,
+    `<span class="cc-chip ${s.unknown ? 'warn' : ''}">无法评估 <strong>${s.unknown}</strong></span>`,
+  ].join('');
+
+  // 渲染顺序与服务端一致；评估结果缺失（极端情况）时以原始任务兜底补在末尾
+  const ordered = evalRes
+    ? [...evalRes.items, ...tasks.filter((t) => !byId.has(t.id)).map((t) => t.id)]
+    : tasks.map((t) => t.id);
+
+  const rows = ordered
+    .map((entry) => {
+      const it =
+        typeof entry === 'object'
+          ? entry
+          : byId.get(entry) || (() => {
+              const raw = tasks.find((t) => t.id === entry);
+              if (!raw) return null;
+              const fromCue = state.data.cues.find((c) => c.id === raw.fromCueId);
+              const toCue = state.data.cues.find((c) => c.id === raw.toCueId);
+              return {
+                id: raw.id,
+                seconds: raw.seconds,
+                actorName: fromCue ? actorName(fromCue.actorId) : '（已删除演员）',
+                changeAreaName: areaName(raw.areaId),
+                from: { time: fromCue ? fromCue.time : null, areaName: fromCue ? areaName(fromCue.areaId) : '（已删除）', note: fromCue ? fromCue.note || '' : '' },
+                to: { time: toCue ? toCue.time : null, areaName: toCue ? areaName(toCue.areaId) : '（已删除）', note: toCue ? toCue.note || '' : '' },
+                segmentIndex: null,
+                departTime: null,
+                reachAreaTime: null,
+                changeDoneTime: null,
+                finalArrivalTime: null,
+                marginSeconds: null,
+                status: 'unknown',
+                reason: '当前模式下暂无评估结果',
+                leg1: null,
+                leg2: null,
+              };
+            })();
+
+      if (!it) return '';
+      const segText =
+        it.from.time === null || it.from.time === undefined
+          ? '（口令已删除）'
+          : `${fmtTime(it.from.time)} ${escapeHtml(it.from.areaName)} → ${fmtTime(it.to.time)} ${escapeHtml(it.to.areaName)}`;
+      const segCell =
+        `<strong>${escapeHtml(it.actorName)}</strong><span class="time-detail">${segText}</span>` +
+        (it.segmentIndex !== null && it.segmentIndex !== undefined
+          ? `<span class="time-detail">对应校验区段 #${it.segmentIndex}</span>`
+          : '');
+
+      let timeCell;
+      if (it.departTime === null || it.departTime === undefined) {
+        timeCell = '<span class="empty-hint">—</span>';
+      } else {
+        timeCell = `<span class="time-detail">实际出发 ${fmtTime(it.departTime)}</span>`;
+        if (it.reachAreaTime !== null) timeCell += `<span class="time-detail">到达换装区 ${fmtTime(it.reachAreaTime)}</span>`;
+        if (it.changeDoneTime !== null) timeCell += `<span class="time-detail">换装完成 <strong>${fmtTime(it.changeDoneTime)}</strong></span>`;
+        if (it.finalArrivalTime !== null) timeCell += `<span class="time-detail">最终到达 <strong>${fmtTime(it.finalArrivalTime)}</strong></span>`;
+      }
+
+      let marginCell;
+      if (it.marginSeconds === null || it.marginSeconds === undefined) {
+        marginCell = '<span class="empty-hint">—</span>';
+      } else if (it.marginSeconds >= 0) {
+        marginCell = `<span class="ontime-tag">余量 ${it.marginSeconds} 秒</span><span class="time-detail">下一口令 ${fmtTime(it.to.time)}</span>`;
+      } else {
+        marginCell = `<span class="late-tag">缺口 ${-it.marginSeconds} 秒</span><span class="time-detail">下一口令 ${fmtTime(it.to.time)}</span>`;
+      }
+
+      const statusCell =
+        `<span class="status-pill ${it.status === 'unknown' ? 'unreachable' : it.status}">${COSTUME_STATUS_LABEL[it.status]}</span>` +
+        (it.reason ? `<span class="time-detail">${escapeHtml(it.reason)}</span>` : '');
+
+      let routeCell = '<span class="empty-hint">—</span>';
+      if (it.leg1 || it.leg2) {
+        routeCell =
+          (it.leg1 ? costumeLegHtml(it.leg1, '① 起点 → 换装区') : '') +
+          (it.leg1 && it.leg2 ? `<span class="cc-change-tag">👔 换装 ${it.seconds} 秒</span>` : '') +
+          (it.leg2 ? costumeLegHtml(it.leg2, '② 换装区 → 终点') : '');
+      }
+
+      return `<tr class="cc-${it.status}">
+        <td>${segCell}</td>
+        <td>${escapeHtml(it.changeAreaName)}<span class="time-detail">换装 ${it.seconds} 秒</span></td>
+        <td>${timeCell}</td>
+        <td>${marginCell}</td>
+        <td>${statusCell}</td>
+        <td class="route">${routeCell}</td>
+        <td class="col-ops"><button class="btn btn-danger" data-del-costume="${it.id}">删除</button></td>
+      </tr>`;
+    })
+    .join('');
+
+  el.innerHTML = `
+    <div class="cc-chips">${chips}</div>
+    <p class="cc-hint">核查口径：实际出发 = 当前模式下该区段的实际出发时刻；段一「起点 → 换装区」与段二「换装完成 → 终点」分别按时间依赖推演（封闭时段等待 / 绕行计入），最终到达 ≤ 下一口令时刻即准时。仅评估该区段，不改写原走位结果。</p>
+    <table class="cc-table">
+      <thead><tr><th>演员 / 区段</th><th>换装区域</th><th>时刻链（出发 → 换装 → 到达）</th><th>相对下一口令</th><th>状态</th><th>换装路线（含等待）</th><th class="col-ops">操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  fillCostumeSelects();
+}
+
+function bindCostume() {
+  $('form-costume').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const seg = $('cc-segment').value;
+    const areaId = $('cc-area').value;
+    const seconds = Number($('cc-seconds').value);
+    if (!seg || !seg.includes('|')) {
+      toast('请选择相邻口令区段', true);
+      return;
+    }
+    if (!areaId) {
+      toast('请选择换装区域', true);
+      return;
+    }
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 3600) {
+      toast('换装所需秒数必须是 0～3600 的整数', true);
+      return;
+    }
+    const [fromCueId, toCueId] = seg.split('|');
+    mutate(async () => {
+      await api('/api/costume-changes', 'POST', { fromCueId, toCueId, areaId, seconds });
+      $('cc-seconds').value = '';
+    }, '换装任务已登记，已即时重算');
+  });
+
+  $('costume-results').addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const id = t.dataset.delCostume;
+    if (!id) return;
+    mutate(() => api(`/api/costume-changes/${id}`, 'DELETE'), '换装任务已删除，已即时重算');
+  });
+}
+
 /* ---------- 下拉框选项 ---------- */
 
 function fillSelect(el, items, placeholder) {
@@ -1249,6 +1471,7 @@ function bindHeaderActions() {
       clearRigItemForm();
       state.sightFocus = null;
       $('form-dependency').reset();
+      $('form-costume').reset();
     }, '已恢复示例数据');
   });
   document.querySelectorAll('#mode-switch .mode-btn').forEach((btn) => {
@@ -2292,6 +2515,7 @@ function bindRigForms() {
   bindHeaderActions();
   bindEvacuation();
   bindDependencies();
+  bindCostume();
   bindImport();
   bindReplay();
   bindSightlineForms();
