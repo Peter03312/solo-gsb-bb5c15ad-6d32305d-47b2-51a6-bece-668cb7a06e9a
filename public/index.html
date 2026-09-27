@@ -12,7 +12,7 @@
       <span class="logo">🎭</span>
       <div>
         <h1>舞台走位校验系统</h1>
-        <p class="subtitle">区域连接图 · 通道容量与封闭时段 · 到位口令时间校验 · 通道占用冲突 · 观众视线遮挡检查 · 吊挂布景载荷核算</p>
+        <p class="subtitle">区域连接图 · 通道容量与封闭时段 · 到位口令时间校验 · 通道占用冲突 · 演员换装核查 · 观众视线遮挡检查 · 吊挂布景载荷核算</p>
       </div>
     </div>
     <div class="actions">
@@ -79,6 +79,27 @@
         </div>
       </form>
       <div id="dependency-results"></div>
+    </section>
+
+    <!-- 演员换装核查 -->
+    <section class="card" id="panel-costume">
+      <h2>👔 演员换装核查</h2>
+      <p class="mode-hint">
+        为<strong>同一演员相邻两条到位口令</strong>（一个区段）登记换装区域与所需整数秒数，<strong>每个区段最多一项</strong>。
+        核查按当前校验模式取该区段的<strong>实际出发时刻</strong>，依次推演「起点 → 换装区」与「换装结束后 → 终点」两段最早路线——
+        两段均计入<strong>通道封闭造成的等待或绕行</strong>（时间依赖推演，不直接相加静态最短耗时）。
+        下方按当前模式即时重算：换装完成时刻、最终到达时刻、相对下一口令的余量与 ✅ 准时 / ❌ 迟到 / ⛔ 不可达状态。
+        核查仅评估该区段，<strong>不改写原走位结果</strong>；删除关联口令或区域时任务自动清理。
+      </p>
+      <form id="form-costume" class="entity-form cc-form">
+        <select id="cc-segment" required></select>
+        <select id="cc-area" required></select>
+        <input type="number" id="cc-seconds" min="0" max="3600" step="1" placeholder="换装所需秒数" class="cc-seconds-input" required />
+        <div class="form-buttons">
+          <button type="submit" class="btn btn-accent" id="cc-submit">添加换装任务</button>
+        </div>
+      </form>
+      <div id="costume-results"></div>
     </section>
 
     <!-- 排练数据 CSV 导入 -->

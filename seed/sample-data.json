@@ -47,6 +47,11 @@
     { "id": "dep-z2-l4", "predecessorId": "cue-z2", "successorId": "cue-l4", "waitSeconds": 5, "note": "张三上台亮相后至少 5 秒李四才能上二层平台（跨演员满足演示）" },
     { "id": "dep-l2-w2", "predecessorId": "cue-l2", "successorId": "cue-w2", "waitSeconds": 0, "note": "李四独唱后王五方可前往天台（后置口令不可达 → 无法判定演示）" }
   ],
+  "costumeChanges": [
+    { "id": "cc-l1-l2", "fromCueId": "cue-l1", "toCueId": "cue-l2", "areaId": "area-wing-r", "seconds": 3, "note": "换装区即起点：第二段撞上侧台右↔舞台中央封闭 [10,14)，原地等待后准时（封闭等待演示）" },
+    { "id": "cc-l2-l3", "fromCueId": "cue-l2", "toCueId": "cue-l3", "areaId": "area-wing-l", "seconds": 15, "note": "中央 → 侧台左换装 → 后台：两种模式余量不同（模式差异演示）" },
+    { "id": "cc-z2-z3", "fromCueId": "cue-z2", "toCueId": "cue-z3", "areaId": "area-upstage", "seconds": 5, "note": "绕经舞台后区换装导致迟到（迟到演示，传导模式缺口更大）" }
+  ],
   "audiencePoints": [
     { "id": "aud-a1", "name": "A 区 1 排 1 座", "x": 500, "y": -800, "eyeHeight": 120 },
     { "id": "aud-a2", "name": "A 区 5 排 6 座", "x": 1500, "y": -2000, "eyeHeight": 115 },

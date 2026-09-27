@@ -8,7 +8,7 @@ const MODE_LABEL = {
 const MODE_NAME = { propagate: '连续口令延误传导', classic: '区段独立校验' };
 
 const state = {
-  data: { areas: [], edges: [], actors: [], cues: [], dependencies: [], audiencePoints: [], targets: [], obstacles: [], rigPoints: [], rigItems: [] },
+  data: { areas: [], edges: [], actors: [], cues: [], dependencies: [], costumeChanges: [], audiencePoints: [], targets: [], obstacles: [], rigPoints: [], rigItems: [] },
   validation: null,
   mode: localStorage.getItem('validate-mode') === 'classic' ? 'classic' : 'propagate',
   evacuation: null, // 已生成快照的参数 { time, exits: [areaId] }；null 表示未启用
@@ -110,6 +110,7 @@ async function refresh() {
   renderActors();
   renderCues();
   renderDependencies();
+  renderCostumeChanges();
   renderValidation();
   renderEvacExitOptions();
   renderAudiencePoints();
@@ -127,6 +128,7 @@ async function refreshValidation() {
   state.validation = await api(`/api/validate?mode=${state.mode}`);
   renderValidation();
   renderDependencies();
+  renderCostumeChanges();
 }
 
 /** 更新「导出校验报告」链接：已生成疏散快照时携带同一快照参数，报告将追加同一快照 */
@@ -929,6 +931,191 @@ function bindDependencies() {
   });
 }
 
+/* ---------- 演员换装核查 ---------- */
+
+const CC_STATUS_LABEL = {
+  ok: '✅ 准时',
+  fail: '❌ 迟到',
+  unreachable: '⛔ 不可达',
+  invalid: '⚠️ 无法评估',
+};
+
+/** 填充换装表单：区段下拉（同一演员按时间相邻的口令对，排除已登记区段）与换装区域下拉 */
+function fillCostumeSelects() {
+  const used = new Set((state.data.costumeChanges || []).map((t) => `${t.fromCueId}|${t.toCueId}`));
+  const current = $('cc-segment').value;
+  const areaIds = new Set(state.data.areas.map((a) => a.id));
+  const groups = [];
+  for (const actor of state.data.actors) {
+    // 与服务端 simulateActor 同一口径：过滤失效区域、按时间升序（稳定排序）
+    const cues = state.data.cues
+      .filter((c) => c.actorId === actor.id && areaIds.has(c.areaId))
+      .slice()
+      .sort((x, y) => x.time - y.time);
+    const opts = [];
+    for (let i = 0; i + 1 < cues.length; i++) {
+      const key = `${cues[i].id}|${cues[i + 1].id}`;
+      if (used.has(key)) continue; // 每个区段最多一项
+      opts.push(
+        `<option value="${key}">${fmtTime(cues[i].time)} ${escapeHtml(areaName(cues[i].areaId))} → ` +
+          `${fmtTime(cues[i + 1].time)} ${escapeHtml(areaName(cues[i + 1].areaId))}</option>`
+      );
+    }
+    if (opts.length > 0) {
+      groups.push(`<optgroup label="${escapeHtml(actor.name)}">${opts.join('')}</optgroup>`);
+    }
+  }
+  const seg = $('cc-segment');
+  seg.innerHTML = groups.join('') || '<option value="">暂无可登记的相邻口令区段</option>';
+  if ([...seg.options].some((o) => o.value === current)) seg.value = current;
+  fillSelect($('cc-area'), state.data.areas, '选择换装区域');
+}
+
+/** 一段路线的逐边明细（起点 → 换装区 / 换装区 → 终点共用） */
+function ccLegHtml(leg) {
+  if (!leg) return '<span class="empty-hint">—</span>';
+  if (leg.legs.length === 0) return '<span class="time-detail">无需移动（同区域）</span>';
+  return leg.legs
+    .map((l) => {
+      let s = `${fmtTime(l.departTime)} ${escapeHtml(l.fromName)} → ${fmtTime(l.arriveTime)} ${escapeHtml(l.toName)}`;
+      if (l.waitSeconds > 0) {
+        s += ` <span class="wait-tag">⏱ 在 ${escapeHtml(l.fromName)} 等待 ${l.waitSeconds} 秒</span>`;
+      }
+      return s;
+    })
+    .join('<br>');
+}
+
+/** 渲染换装核查结果表（随校验结果即时重算） */
+function renderCostumeChanges() {
+  const v = state.validation;
+  const el = $('costume-results');
+  if (!v) return;
+
+  const cc = v.costumeChanges || { items: [], summary: { total: 0, ok: 0, fail: 0, unreachable: 0, invalid: 0 } };
+  const s = cc.summary;
+
+  if ((state.data.costumeChanges || []).length === 0) {
+    el.innerHTML =
+      '<p class="empty-hint">暂无换装任务。选择同一演员相邻两条口令构成的区段、换装区域并填写所需秒数后点击「添加换装任务」。</p>';
+    fillCostumeSelects();
+    return;
+  }
+
+  const chips = [
+    `<span class="cc-chip">换装任务 <strong>${s.total}</strong></span>`,
+    `<span class="cc-chip ${s.ok ? 'good' : ''}">准时 <strong>${s.ok}</strong></span>`,
+    `<span class="cc-chip ${s.fail ? 'bad' : ''}">迟到 <strong>${s.fail}</strong></span>`,
+    `<span class="cc-chip ${s.unreachable ? 'warn' : ''}">不可达 <strong>${s.unreachable}</strong></span>`,
+    `<span class="cc-chip ${s.invalid ? 'warn' : ''}">无法评估 <strong>${s.invalid}</strong></span>`,
+  ].join('');
+
+  const rows = cc.items
+    .map((it) => {
+      const segCell =
+        it.from.time === undefined || it.to.time === undefined
+          ? '<span class="empty-hint">（口令已删除）</span>'
+          : `<span class="time-detail">${fmtTime(it.from.time)} ${escapeHtml(it.from.areaName)}${it.from.note ? ' · ' + escapeHtml(it.from.note) : ''}</span>` +
+            `<span class="time-detail">→ ${fmtTime(it.to.time)} ${escapeHtml(it.to.areaName)}${it.to.note ? ' · ' + escapeHtml(it.to.note) : ''}</span>`;
+
+      let timeCell;
+      if (it.status === 'invalid') {
+        timeCell = '<span class="empty-hint">—</span>';
+      } else {
+        timeCell =
+          `<span class="time-detail">实际出发 ${fmtTime(it.depart)}</span>` +
+          (it.changeDone === null
+            ? ''
+            : `<span class="time-detail">换装完成 <strong class="cc-done">${fmtTime(it.changeDone)}</strong></span>`) +
+          (it.finalArrival === null
+            ? ''
+            : `<span class="time-detail">最终到达 <strong class="cc-done">${fmtTime(it.finalArrival)}</strong></span>`);
+      }
+
+      let verdict;
+      if (it.status === 'ok') {
+        verdict = `<span class="status-pill ok">${CC_STATUS_LABEL.ok}</span><span class="time-detail">余量 ${it.margin} 秒</span>`;
+      } else if (it.status === 'fail') {
+        verdict = `<span class="status-pill fail">${CC_STATUS_LABEL.fail}</span><span class="time-detail"><strong>缺口 ${-it.margin} 秒</strong></span>`;
+      } else if (it.status === 'unreachable') {
+        verdict = `<span class="status-pill unreachable">${CC_STATUS_LABEL.unreachable}</span><span class="time-detail">${escapeHtml(it.reason)}</span>`;
+      } else {
+        verdict = `<span class="status-pill unreachable">${CC_STATUS_LABEL.invalid}</span><span class="time-detail">${escapeHtml(it.reason)}</span>`;
+      }
+
+      let routeCell = '<span class="empty-hint">—</span>';
+      if (it.status !== 'invalid') {
+        const parts = [];
+        parts.push(`<span class="cc-leg-title">① 起点 → 换装区</span>${ccLegHtml(it.leg1)}`);
+        if (it.changeDone !== null) {
+          parts.push(
+            `<span class="cc-change-tag">👔 在「${escapeHtml(it.changeAreaName)}」换装 ${it.seconds} 秒` +
+              `（${fmtTime(it.changeDone - it.seconds)} → ${fmtTime(it.changeDone)}）</span>`
+          );
+          parts.push(`<span class="cc-leg-title">② 换装区 → 终点</span>${ccLegHtml(it.leg2)}`);
+        }
+        routeCell = parts.join('');
+      }
+
+      return `<tr class="cc-${it.status}">
+        <td><strong>${escapeHtml(it.actorName)}</strong></td>
+        <td>${segCell}</td>
+        <td>${escapeHtml(it.changeAreaName)}<span class="time-detail">${it.seconds} 秒</span></td>
+        <td>${timeCell}</td>
+        <td>${verdict}</td>
+        <td class="route">${routeCell}</td>
+        <td class="col-ops"><button class="btn btn-danger" data-del-cc="${it.id}">删除</button></td>
+      </tr>`;
+    })
+    .join('');
+
+  el.innerHTML = `
+    <div class="cc-chips">${chips}</div>
+    <p class="cc-hint">核查口径：实际出发时刻取自当前校验模式的区段推演；两段路线均按时间依赖推演计入封闭等待 / 绕行；余量 = 下一口令时刻 − 最终到达时刻（负为缺口）。仅评估该区段，不改写原走位结果。</p>
+    <table class="cc-table">
+      <thead><tr><th>演员</th><th>区段（起点 → 终点口令）</th><th>换装区域 · 所需</th><th>关键时刻</th><th>结论 / 余量</th><th>换装路线（两段）</th><th class="col-ops">操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  fillCostumeSelects();
+}
+
+function bindCostumeChanges() {
+  $('form-costume').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const seg = $('cc-segment').value;
+    const areaId = $('cc-area').value;
+    const seconds = Number($('cc-seconds').value);
+    if (!seg || !seg.includes('|')) {
+      toast('请选择要登记的相邻口令区段', true);
+      return;
+    }
+    if (!areaId) {
+      toast('请选择换装区域', true);
+      return;
+    }
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 3600) {
+      toast('换装所需秒数必须是 0～3600 的整数', true);
+      return;
+    }
+    const [fromCueId, toCueId] = seg.split('|');
+    mutate(
+      async () => {
+        await api('/api/costume-changes', 'POST', { fromCueId, toCueId, areaId, seconds });
+        $('cc-seconds').value = '';
+      },
+      '换装任务已添加，已即时重算'
+    );
+  });
+
+  $('costume-results').addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const id = t.dataset.delCc;
+    if (!id) return;
+    mutate(() => api(`/api/costume-changes/${id}`, 'DELETE'), '换装任务已删除，已即时重算');
+  });
+}
+
 /* ---------- 下拉框选项 ---------- */
 
 function fillSelect(el, items, placeholder) {
@@ -1249,6 +1436,7 @@ function bindHeaderActions() {
       clearRigItemForm();
       state.sightFocus = null;
       $('form-dependency').reset();
+      $('form-costume').reset();
     }, '已恢复示例数据');
   });
   document.querySelectorAll('#mode-switch .mode-btn').forEach((btn) => {
@@ -2292,6 +2480,7 @@ function bindRigForms() {
   bindHeaderActions();
   bindEvacuation();
   bindDependencies();
+  bindCostumeChanges();
   bindImport();
   bindReplay();
   bindSightlineForms();
